@@ -7,6 +7,7 @@ const APPID = 3678970;
 const STEAM_CURRENCY = 23; // CNY / Chinese Renminbi (yuan)
 const CURRENCY_SYMBOL = '¥';
 const PER = 100;            // Steam caps search/render at 100 per page
+const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS || 20000);
 const UA = 'Mozilla/5.0 (tbh-prices-cron; +https://github.com/WarmBed/TBH-DPS-dashboard)';
 
 // Route Steam through the optional Cloudflare Worker when configured. For scheduled local runs,
@@ -26,7 +27,7 @@ function priceUrl(name) {
 
 async function page(start) {
   // sort_column=name keeps the order STABLE across calls so each start-window covers a disjoint slice.
-  const res = await fetch(searchUrl(start), { headers: { 'User-Agent': UA, ...PROXY_H } });
+  const res = await fetch(searchUrl(start), { headers: { 'User-Agent': UA, ...PROXY_H }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`steam HTTP ${res.status} at start=${start}`);
   return res.json();
 }
@@ -143,7 +144,7 @@ let vol = (history.vol && history.vol.items) ? history.vol : { at: 0, items: {} 
 async function priceoverview(name, tries) {
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
-      const r = await fetch(priceUrl(name), { headers: { 'User-Agent': UA, ...PROXY_H } });
+      const r = await fetch(priceUrl(name), { headers: { 'User-Agent': UA, ...PROXY_H }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (r.status === 429) { await sleep(VIA_PROXY ? 800 * (attempt + 1) : 15000); continue; }   // escalating backoff
       if (r.ok) return await r.json();   // valid response — success may be true OR false (no market data)
     } catch { /* retry */ }
