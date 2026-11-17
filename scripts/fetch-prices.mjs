@@ -158,16 +158,37 @@ for (const [name, v] of Object.entries(items)) {
 const VOL_BUDGET_MS = Number(process.env.VOL_BUDGET_MS || 5 * 60 * 1000);   // per-run time box for CNY priceoverview refresh
 let vol = (history.vol && history.vol.items) ? history.vol : { at: 0, items: {} };
 const refreshedNames = new Set();
+const priceFailureCounts = new Map();
+function notePriceFailure(kind) {
+  priceFailureCounts.set(kind, (priceFailureCounts.get(kind) || 0) + 1);
+}
 
 async function priceoverview(name, tries) {
+  let failureKind = 'network_or_timeout';
   for (let attempt = 0; attempt < tries; attempt++) {
     try {
       const r = await fetch(priceUrl(name), { headers: { 'User-Agent': UA, ...PROXY_H }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-      if (r.status === 429) { await sleep(VIA_PROXY ? 800 * (attempt + 1) : 15000); continue; }   // escalating backoff
-      if (r.ok) return await r.json();   // valid response — success may be true OR false (no market data)
+      if (r.status === 429) { failureKind = 'http_429'; await sleep(VIA_PROXY ? 800 * (attempt + 1) : 15000); continue; }   // escalating backoff
+      if (r.ok) {
+        try { return await r.json(); }   // valid response — success may be true OR false (no market data)
+        catch { failureKind = 'invalid_json_response'; }
+      } else if (r.status === 403) {
+        // The Worker itself returns this exact body when x-proxy-key does not match. Other 403
+        // bodies are passed through from the upstream and must be diagnosed separately.
+        let body = '';
+        try { body = (await r.text()).trim().toLowerCase(); } catch { /* keep generic 403 */ }
+        failureKind = body === 'forbidden' ? 'worker_key_rejected_403' : 'upstream_or_edge_403';
+        if (failureKind === 'worker_key_rejected_403') {
+          notePriceFailure(failureKind);
+          return null;
+        }
+      } else {
+        failureKind = `http_${r.status}`;
+      }
     } catch { /* retry */ }
     await sleep(VIA_PROXY ? 600 * (attempt + 1) : 4000);
   }
+  notePriceFailure(failureKind);
   return null;   // never reached Steam → leave the persisted value, retry next run
 }
 function applyVol(name, pj) {
@@ -199,7 +220,10 @@ function priceBatch(name) {
 }
 if (VIA_PROXY && !process.env.SKIP_VOL) {
   // Each half-hour run handles one stable 1/20 cohort; the cursor is persisted in history.json.
-  const batch = ((Number(history.priceBatchCursor) || 0) % PRICE_BATCH_COUNT + PRICE_BATCH_COUNT) % PRICE_BATCH_COUNT;
+  const storedCursor = Number(history.priceBatchCursor);
+  if (!Number.isInteger(storedCursor) || storedCursor < 0 || storedCursor >= PRICE_BATCH_COUNT)
+    history.priceBatchCursor = 0;   // initialize legacy history files written before batch rotation existed
+  const batch = history.priceBatchCursor;
   const cohort = volNames.filter(name => priceBatch(name) === batch);
   // Within this cohort, try never-refreshed and stalest items first.
   const order = cohort.sort((a, b) => {
@@ -211,8 +235,13 @@ if (VIA_PROXY && !process.env.SKIP_VOL) {
   const worker = async () => { while (idx < order.length && Date.now() < deadline) { const n = order[idx++]; if (applyVol(n, await priceoverview(n, 3))) done++; } };
   await Promise.all(Array.from({ length: 2 }, worker));
   if (done > 0) history.priceBatchCursor = (batch + 1) % PRICE_BATCH_COUNT;
+  const failures = [...priceFailureCounts].map(([kind, count]) => `${kind}=${count}`).join(', ') || 'none';
+  console.log(`refreshed ${done}/${order.length} items in price batch ${batch + 1}/${PRICE_BATCH_COUNT} (next batch ${history.priceBatchCursor + 1}, ${Math.round(VOL_BUDGET_MS / 1000)}s budget, via proxy; failures: ${failures})`);
+  if (order.length > 0 && done === 0) {
+    console.error('[prices] ABORT: no valid priceoverview responses; refusing to publish stale prices or advance the batch cursor.');
+    process.exit(1);
+  }
   vol.at = now;
-  console.log(`refreshed ${done}/${order.length} items in price batch ${batch + 1}/${PRICE_BATCH_COUNT} (next batch ${history.priceBatchCursor + 1}, ${Math.round(VOL_BUDGET_MS / 1000)}s budget, via proxy)`);
 } else if (!process.env.SKIP_VOL) {
   const order = volNames.slice().sort((a, b) => {
     const ta = (vol.items[a] && vol.items[a].at) || 0, tb = (vol.items[b] && vol.items[b].at) || 0;
