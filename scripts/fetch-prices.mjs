@@ -1,7 +1,6 @@
 // Fetch TaskBarHero (Steam appid 3678970) Community Market prices into prices.json.
-// Paged via market/search/render (no login, no per-item priceoverview spam): each result gives
-// the lowest sell price (cents) + live listing count. Run by the steam-prices GitHub Action every
-// 30 min; the output is published to the `data` branch and served via jsDelivr to the plugin.
+// Catalog/listing metadata comes from market/search/render; verified CNY prices come from
+// priceoverview. The local Windows updater publishes the result to the `data` branch.
 import { writeFile } from 'node:fs/promises';
 
 const APPID = 3678970;
@@ -10,10 +9,8 @@ const CURRENCY_SYMBOL = '¥';
 const PER = 100;            // Steam caps search/render at 100 per page
 const UA = 'Mozilla/5.0 (tbh-prices-cron; +https://github.com/WarmBed/TBH-DPS-dashboard)';
 
-// Route Steam through the Cloudflare Worker proxy (worker-tbh-proxy) when configured. GitHub's
-// datacenter IP is heavily rate-limited by Steam — the search sweep stalls at ~131/740 and the
-// priceoverview volume loop 429s and hangs for hours. CF egress is NOT throttled: a full 740 sweep
-// and all volumes take seconds. Falls back to hitting Steam directly when PROXY_BASE is unset.
+// Route Steam through the optional Cloudflare Worker when configured. For scheduled local runs,
+// leave PROXY_BASE unset so Steam sees the user's normal network instead of a rate-limited CI IP.
 const PROXY_BASE = (process.env.PROXY_BASE || '').replace(/\/+$/, '');
 const PROXY_KEY = process.env.PROXY_KEY || '';
 const VIA_PROXY = !!PROXY_BASE;
@@ -68,7 +65,9 @@ while (guard++ < MAX_PAGES) {
     // terminal can build its catalog from Steam directly (no tbh-market for anything but the order book).
     const ad = r.asset_description || {};
     items[name] = {
-      lowestCents: r.sell_price ?? 0, qty: r.sell_listings ?? 0,
+      // search/render returns prices in the caller's wallet currency even when currency=23 is set.
+      // Keep only discovery metadata here; priceoverview below supplies the actual CNY amount.
+      qty: r.sell_listings ?? 0,
       dispName: ad.name || name, color: ad.name_color || null, icon: ad.icon_url || null, type: ad.type || null,
     };
   }
@@ -103,6 +102,7 @@ try {
 } catch { /* first run / 404 -> empty history */ }
 if (!history.items || Array.isArray(history.items)) history.items = {};   // ignore old snapshot-major format
 if (!history.vol) history.vol = { at: 0, items: {} };
+if (!history.vol.items) history.vol.items = {};
 if (history.currencyCode !== STEAM_CURRENCY) {
   console.log(`[prices] resetting history from currency ${history.currencyCode ?? 'unknown'} to CNY`);
   history = { currencyCode: STEAM_CURRENCY, items: {}, vol: { at: 0, items: {} } };
@@ -113,10 +113,13 @@ const cutoff = now - HISTORY_DAYS * DAY;
 for (const [name, v] of Object.entries(items)) {
   let series = Array.isArray(history.items[name]) ? history.items[name] : null;
   if (!series) series = [];
+  const cachedPrice = history.vol.items[name]?.lowestCents;
+  if (typeof cachedPrice === 'number') v.lowestCents = cachedPrice;
   const lastPt = series[series.length - 1];
   // forward point: [tMs, cents, 24h-volume] — the volume is the last-known (≤6h) priceoverview figure,
   // so the web terminal can build a volume series (Steam ask-history has no per-trade volume).
-  if (!lastPt || now - lastPt[0] >= SAMPLE_GAP_MS) series.push([now, v.lowestCents, (history.vol.items[name] || {}).vol || 0]);
+  if (typeof v.lowestCents === 'number' && (!lastPt || now - lastPt[0] >= SAMPLE_GAP_MS))
+    series.push([now, v.lowestCents, (history.vol.items[name] || {}).vol || 0]);
   history.items[name] = series.filter(p => p[0] >= cutoff);                             // prune window
 }
 
@@ -131,14 +134,11 @@ for (const [name, v] of Object.entries(items)) {
   if (win.length) v.hist = win.map(p => [Math.floor(p[0] / 1000), p[1], p[2] || 0]);
 }
 
-// ---- 24h volume + median sale price (priceoverview, per-item). Steam rate-limits this HARD even via
-// the proxy, so refreshing all ~740 every run can exceed the job timeout. Instead each run refreshes the
-// STALEST items first within a fixed time budget; values persist (per-item `at`) in history.vol and
-// rotate fully in over a few runs. Direct (no proxy) keeps the gentle ~6h sequential refresh. ----
-const VOL_REFRESH_MS = 6 * 3600 * 1000;
-const VOL_BUDGET_MS = Number(process.env.VOL_BUDGET_MS || 5 * 60 * 1000);   // per-run time box for the proxy refresh
+// ---- CNY prices + 24h volume/median (priceoverview, per-item). Search/render does not honor the
+// currency parameter for sell_price_text, so never treat that field as CNY. Refresh the stalest items
+// first within a fixed request budget; cached CNY values persist in history.vol and rotate over time. ----
+const VOL_BUDGET_MS = Number(process.env.VOL_BUDGET_MS || 5 * 60 * 1000);   // per-run time box for CNY priceoverview refresh
 let vol = (history.vol && history.vol.items) ? history.vol : { at: 0, items: {} };
-const volAge = vol.at ? now - vol.at : Infinity;
 
 async function priceoverview(name, tries) {
   for (let attempt = 0; attempt < tries; attempt++) {
@@ -156,11 +156,17 @@ function applyVol(name, pj) {
   if (pj.success) {
     const vRaw = (pj.volume || '').replace(/[^0-9]/g, '');
     const mRaw = (pj.median_price || '').replace(/[^0-9.]/g, '');
-    vol.items[name] = { vol: vRaw ? parseInt(vRaw, 10) : 0, medianCents: mRaw ? Math.round(parseFloat(mRaw) * 100) : 0, at: now };
+    const pRaw = (pj.lowest_price || '').replace(/[^0-9.,]/g, '').replace(/,/g, '');
+    vol.items[name] = {
+      lowestCents: pRaw ? Math.round(parseFloat(pRaw) * 100) : null,
+      vol: vRaw ? parseInt(vRaw, 10) : 0,
+      medianCents: mRaw ? Math.round(parseFloat(mRaw) * 100) : 0,
+      at: now,
+    };
   } else {
     // valid "no market data" answer → record 0 with a timestamp so we stop re-hitting it every run
     const prev = vol.items[name] || {};
-    vol.items[name] = { vol: 0, medianCents: prev.medianCents || 0, at: now };
+    vol.items[name] = { lowestCents: null, vol: 0, medianCents: prev.medianCents || 0, at: now };
   }
   return true;
 }
@@ -178,22 +184,43 @@ if (VIA_PROXY && !process.env.SKIP_VOL) {
   await Promise.all(Array.from({ length: 8 }, worker));
   vol.at = now;
   console.log(`refreshed volume/median for ${done}/${order.length} items this run (stalest-first, ${Math.round(VOL_BUDGET_MS / 1000)}s budget, via proxy)`);
-} else if (!process.env.SKIP_VOL && volAge >= VOL_REFRESH_MS) {
+} else if (!process.env.SKIP_VOL) {
+  const order = volNames.slice().sort((a, b) => {
+    const ta = (vol.items[a] && vol.items[a].at) || 0, tb = (vol.items[b] && vol.items[b].at) || 0;
+    return ta !== tb ? ta - tb : (items[b].qty || 0) - (items[a].qty || 0);
+  });
+  const deadline = Date.now() + VOL_BUDGET_MS;
   let done = 0;
-  for (const name of volNames) {
+  for (const name of order) {
+    if (Date.now() >= deadline) break;
     if (applyVol(name, await priceoverview(name, 3))) done++;
-    await sleep(3500);   // ~17 req/min — stay under Steam's unauthenticated limit
+    await sleep(3500);   // ~17 requests/minute on the user's local egress
   }
   vol.at = now;
-  console.log(`refreshed volume/median for ${done}/${volNames.length} items (direct)`);
+  console.log(`refreshed CNY price/volume/median for ${done}/${order.length} items (direct, ${Math.round(VOL_BUDGET_MS / 1000)}s budget)`);
 }
 history.vol = vol;
 for (const [name, v] of Object.entries(items)) {
   const vr = vol.items[name];
+  if (vr && typeof vr.lowestCents === 'number') v.lowestCents = vr.lowestCents;
+  else delete v.lowestCents; // never label search/render's wallet-currency amount as CNY
   if (vr) { v.vol = vr.vol; v.medianCents = vr.medianCents; }
 }
 
+// Replace this run's provisional history points with the CNY priceoverview results.
+for (const [name, v] of Object.entries(items)) {
+  if (typeof v.lowestCents !== 'number') continue;
+  const series = history.items[name] || [];
+  const last = series[series.length - 1];
+  if (last && last[0] === now) { last[1] = v.lowestCents; last[2] = v.vol || 0; }
+  else if (!last || now - last[0] >= SAMPLE_GAP_MS) series.push([now, v.lowestCents, v.vol || 0]);
+  history.items[name] = series.filter(p => p[0] >= cutoff);
+}
+
 const out = { cachedAt: now, appid: APPID, currency: CURRENCY_SYMBOL, currencyCode: STEAM_CURRENCY, count: Object.keys(items).length, items };
+const pricedCount = Object.values(items).filter(v => typeof v.lowestCents === 'number').length;
+console.log(`[prices] ${pricedCount}/${out.count} items have a verified CNY priceoverview value`);
+if (pricedCount < 5) { console.error('[prices] ABORT: too few verified CNY prices; refusing to publish a mislabeled feed.'); process.exit(1); }
 await writeFile('prices.json', JSON.stringify(out));
 await writeFile('history.json', JSON.stringify(history));
 console.log(`wrote prices.json: ${out.count} items in CNY; prevCents on ${stamped}, hist series for ${Object.keys(history.items).length} items`);

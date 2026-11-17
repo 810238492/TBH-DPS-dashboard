@@ -1,12 +1,10 @@
 name: steam-prices
 
-# Fetch TaskBarHero Steam Community Market prices every 30 min and publish prices.json to the
-# `data` branch (kept to a single commit via force-push so the source history stays clean).
+# Manually fetch TaskBarHero Steam Community Market prices and publish prices.json to the
+# `data` branch. GitHub-hosted requests are rate-limited by Steam; scheduled refreshes run locally.
 # Served to the plugin via jsDelivr: cdn.jsdelivr.net/gh/WarmBed/TBH-DPS-dashboard@data/prices.json
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'
   workflow_dispatch: {}
 
 permissions:

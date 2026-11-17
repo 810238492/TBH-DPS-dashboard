@@ -156,9 +156,19 @@ Press **F4** to enter position-adjust mode and drag the box where you want it. T
 </tr>
 </table>
 
-### Self-host the price proxy (GitHub Actions)
-The scheduled workflow needs a Cloudflare Worker proxy because Steam rate-limits GitHub-hosted runners.
-Deploy the included Worker to your own Cloudflare account, then configure this repository:
+### Refresh the price feed
+Steam rate-limits GitHub-hosted runners, so the reliable 30-minute refresh runs on your Windows PC
+and publishes to this repository's `data` branch. Keep the PC logged in, Steam reachable through
+your normal connection, and GitHub's credential manager signed in. Run
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/update-local-feed.ps1` once to publish
+immediately. To repeat it every 30 minutes, create a Task Scheduler task that runs the same command
+as your logged-in Windows user. The task uses the Windows proxy setting when one is configured.
+
+GitHub Actions has a manual workflow for troubleshooting, but its scheduled trigger is disabled
+because Steam returns HTTP 429 from hosted runners. The optional Cloudflare Worker remains available
+for proxying requests; it does not remove Steam's rate limit.
+
+To deploy the optional Worker to your Cloudflare account:
 
 1. Install Node.js, open a terminal at the repository root, and run `npx wrangler login`.
 2. Deploy with `npx wrangler deploy --config worker-tbh-proxy/wrangler.toml`. Copy the resulting
@@ -168,8 +178,7 @@ Deploy the included Worker to your own Cloudflare account, then configure this r
 4. In this repository, open **Settings → Secrets and variables → Actions**. Add a repository secret
    named `PROXY_KEY` with the same key, and a repository variable named `PROXY_BASE` with the Worker
    URL (no trailing slash).
-5. Enable Actions for the fork and run **Actions → steam-prices → Run workflow** once. The workflow
-   then refreshes the CNY feed on its 30-minute schedule.
+5. The Actions workflow can be run manually, but automatic refresh is handled by the local task above.
 
 The proxy key is created by you and must match on Cloudflare and GitHub. Do not commit it or post it
 in an issue or chat. The Worker configuration intentionally has no upstream account ID so Wrangler
