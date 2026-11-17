@@ -1,13 +1,14 @@
 // Fetch TaskBarHero (Steam appid 3678970) Community Market prices into prices.json.
 // Catalog/listing metadata comes from market/search/render; verified CNY prices come from
 // priceoverview. The local Windows updater publishes the result to the `data` branch.
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 
 const APPID = 3678970;
 const STEAM_CURRENCY = 23; // CNY / Chinese Renminbi (yuan)
 const CURRENCY_SYMBOL = '¥';
 const PER = 100;            // Steam caps search/render at 100 per page
 const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS || 20000);
+const CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const UA = 'Mozilla/5.0 (tbh-prices-cron; +https://github.com/WarmBed/TBH-DPS-dashboard)';
 
 // Route Steam through the optional Cloudflare Worker when configured. For scheduled local runs,
@@ -34,6 +35,21 @@ async function page(start) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const items = {};
+let catalogAt = 0;
+try {
+  const previous = JSON.parse(await readFile('prices.json', 'utf8'));
+  const stamp = Number(previous.catalogAt || previous.cachedAt || 0);
+  if (previous.appid === APPID && previous.items && Date.now() - stamp < CATALOG_MAX_AGE_MS) {
+    for (const [name, v] of Object.entries(previous.items)) {
+      items[name] = {
+        qty: v.qty || 0, dispName: v.dispName || name, color: v.color || null,
+        icon: v.icon || null, type: v.type || null,
+      };
+    }
+    catalogAt = stamp;
+    console.log(`[prices] reused ${Object.keys(items).length} catalog entries refreshed within 24h`);
+  }
+} catch { /* no usable prior feed → discover the catalog from Steam */ }
 let start = 0, maxTotal = 0, guard = 0, sinceNew = 0, lastCount = 0;
 // Steam's market search is hostile to completeness: total_count is FLAKY+inflated (151 one call, 112 the
 // next; counts delisted/0-listing entries it never actually returns), it caps the page at ~10 regardless
@@ -44,7 +60,7 @@ let start = 0, maxTotal = 0, guard = 0, sinceNew = 0, lastCount = 0;
 // us under the throttle so CI catches the same ~full set a single home IP does.
 const STALL = 14;          // stop after this many consecutive pages with no new item
 const MAX_PAGES = 200;     // hard backstop
-while (guard++ < MAX_PAGES) {
+while (!Object.keys(items).length && guard++ < MAX_PAGES) {
   let j = null, results = null;
   let lastError = 'invalid Steam response';
   for (let attempt = 0; attempt < 6; attempt++) {
@@ -82,7 +98,8 @@ while (guard++ < MAX_PAGES) {
 // total_count is inflated and unreachable, so it's NOT the completeness signal — the STALL above is.
 // Guard only against a clearly-truncated run (hard rate-limit) by refusing to ship a near-empty feed.
 const gotCount = Object.keys(items).length;
-console.log(`[prices] fetched ${gotCount} unique items in ${guard} pages (steam total_count reported up to ${maxTotal})`);
+if (guard) catalogAt = Date.now();
+if (guard) console.log(`[prices] fetched ${gotCount} unique items in ${guard} pages (steam total_count reported up to ${maxTotal})`);
 if (gotCount < 50) { console.error(`[prices] ABORT: only ${gotCount} items — Steam rate-limited the run; keeping the previous feed.`); process.exit(1); }
 
 // ---- price history (item-major). Each item keeps a rolling [[tMs, minorUnits], ...] series in
@@ -218,7 +235,7 @@ for (const [name, v] of Object.entries(items)) {
   history.items[name] = series.filter(p => p[0] >= cutoff);
 }
 
-const out = { cachedAt: now, appid: APPID, currency: CURRENCY_SYMBOL, currencyCode: STEAM_CURRENCY, count: Object.keys(items).length, items };
+const out = { cachedAt: now, catalogAt: catalogAt || now, appid: APPID, currency: CURRENCY_SYMBOL, currencyCode: STEAM_CURRENCY, count: Object.keys(items).length, items };
 const pricedCount = Object.values(items).filter(v => typeof v.lowestCents === 'number').length;
 console.log(`[prices] ${pricedCount}/${out.count} items have a verified CNY priceoverview value`);
 if (pricedCount < 5) { console.error('[prices] ABORT: too few verified CNY prices; refusing to publish a mislabeled feed.'); process.exit(1); }
