@@ -9,6 +9,7 @@ const CURRENCY_SYMBOL = '¥';
 const PER = 100;            // Steam caps search/render at 100 per page
 const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS || 20000);
 const CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const PRICE_BATCH_COUNT = 20;
 const UA = 'Mozilla/5.0 (tbh-prices-cron; +https://github.com/WarmBed/TBH-DPS-dashboard)';
 
 // Route Steam through the optional Cloudflare Worker when configured. For scheduled local runs,
@@ -113,11 +114,15 @@ const HIST_WINDOW_MS = 7 * DAY;            // window shipped to the plugin
 const REPO = process.env.GITHUB_REPOSITORY || 'WarmBed/TBH-DPS-dashboard';
 const HISTORY_URL = `https://raw.githubusercontent.com/${REPO}/data/history.json`;
 
-let history = { currencyCode: STEAM_CURRENCY, items: {}, vol: { at: 0, items: {} } };
+let history = { currencyCode: STEAM_CURRENCY, items: {}, vol: { at: 0, items: {} }, priceBatchCursor: 0 };
 try {
-  const r = await fetch(HISTORY_URL, { headers: { 'User-Agent': UA } });
-  if (r.ok) { const j = await r.json(); if (j && typeof j === 'object') history = j; }
-} catch { /* first run / 404 -> empty history */ }
+  history = JSON.parse(await readFile('history.json', 'utf8'));
+} catch {
+  try {
+    const r = await fetch(HISTORY_URL, { headers: { 'User-Agent': UA, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) } });
+    if (r.ok) { const j = await r.json(); if (j && typeof j === 'object') history = j; }
+  } catch { /* first run / 404 -> empty history */ }
+}
 if (!history.items || Array.isArray(history.items)) history.items = {};   // ignore old snapshot-major format
 if (!history.vol) history.vol = { at: 0, items: {} };
 if (!history.vol.items) history.vol.items = {};
@@ -133,11 +138,6 @@ for (const [name, v] of Object.entries(items)) {
   if (!series) series = [];
   const cachedPrice = history.vol.items[name]?.lowestCents;
   if (typeof cachedPrice === 'number') v.lowestCents = cachedPrice;
-  const lastPt = series[series.length - 1];
-  // forward point: [tMs, cents, 24h-volume] — the volume is the last-known (≤6h) priceoverview figure,
-  // so the web terminal can build a volume series (Steam ask-history has no per-trade volume).
-  if (typeof v.lowestCents === 'number' && (!lastPt || now - lastPt[0] >= SAMPLE_GAP_MS))
-    series.push([now, v.lowestCents, (history.vol.items[name] || {}).vol || 0]);
   history.items[name] = series.filter(p => p[0] >= cutoff);                             // prune window
 }
 
@@ -157,6 +157,7 @@ for (const [name, v] of Object.entries(items)) {
 // first within a fixed request budget; cached CNY values persist in history.vol and rotate over time. ----
 const VOL_BUDGET_MS = Number(process.env.VOL_BUDGET_MS || 5 * 60 * 1000);   // per-run time box for CNY priceoverview refresh
 let vol = (history.vol && history.vol.items) ? history.vol : { at: 0, items: {} };
+const refreshedNames = new Set();
 
 async function priceoverview(name, tries) {
   for (let attempt = 0; attempt < tries; attempt++) {
@@ -181,6 +182,7 @@ function applyVol(name, pj) {
       medianCents: mRaw ? Math.round(parseFloat(mRaw) * 100) : 0,
       at: now,
     };
+    if (pRaw) refreshedNames.add(name);
   } else {
     // valid "no market data" answer → record 0 with a timestamp so we stop re-hitting it every run
     const prev = vol.items[name] || {};
@@ -190,9 +192,17 @@ function applyVol(name, pj) {
 }
 
 const volNames = Object.keys(items);
+function priceBatch(name) {
+  let hash = 2166136261;
+  for (let i = 0; i < name.length; i++) { hash ^= name.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+  return (hash >>> 0) % PRICE_BATCH_COUNT;
+}
 if (VIA_PROXY && !process.env.SKIP_VOL) {
-  // stalest first (never-refreshed = at 0); among equally-stale, more-listed (active) items go first
-  const order = volNames.slice().sort((a, b) => {
+  // Each half-hour run handles one stable 1/20 cohort; the cursor is persisted in history.json.
+  const batch = ((Number(history.priceBatchCursor) || 0) % PRICE_BATCH_COUNT + PRICE_BATCH_COUNT) % PRICE_BATCH_COUNT;
+  const cohort = volNames.filter(name => priceBatch(name) === batch);
+  // Within this cohort, try never-refreshed and stalest items first.
+  const order = cohort.sort((a, b) => {
     const ta = (vol.items[a] && vol.items[a].at) || 0, tb = (vol.items[b] && vol.items[b].at) || 0;
     return ta !== tb ? ta - tb : (items[b].qty || 0) - (items[a].qty || 0);
   });
@@ -200,8 +210,9 @@ if (VIA_PROXY && !process.env.SKIP_VOL) {
   let done = 0, idx = 0;
   const worker = async () => { while (idx < order.length && Date.now() < deadline) { const n = order[idx++]; if (applyVol(n, await priceoverview(n, 3))) done++; } };
   await Promise.all(Array.from({ length: 2 }, worker));
+  if (done > 0) history.priceBatchCursor = (batch + 1) % PRICE_BATCH_COUNT;
   vol.at = now;
-  console.log(`refreshed volume/median for ${done}/${order.length} items this run (stalest-first, ${Math.round(VOL_BUDGET_MS / 1000)}s budget, via proxy)`);
+  console.log(`refreshed ${done}/${order.length} items in price batch ${batch + 1}/${PRICE_BATCH_COUNT} (next batch ${history.priceBatchCursor + 1}, ${Math.round(VOL_BUDGET_MS / 1000)}s budget, via proxy)`);
 } else if (!process.env.SKIP_VOL) {
   const order = volNames.slice().sort((a, b) => {
     const ta = (vol.items[a] && vol.items[a].at) || 0, tb = (vol.items[b] && vol.items[b].at) || 0;
@@ -228,6 +239,7 @@ for (const [name, v] of Object.entries(items)) {
 // Replace this run's provisional history points with the CNY priceoverview results.
 for (const [name, v] of Object.entries(items)) {
   if (typeof v.lowestCents !== 'number') continue;
+  if (!refreshedNames.has(name)) continue;
   const series = history.items[name] || [];
   const last = series[series.length - 1];
   if (last && last[0] === now) { last[1] = v.lowestCents; last[2] = v.vol || 0; }

@@ -157,11 +157,11 @@ Press **F4** to enter position-adjust mode and drag the box where you want it. T
 </table>
 
 ### Refresh the price feed
-The GitHub Actions workflow requests Steam prices through the included Cloudflare Worker and publishes
-the feed to the `data` branch three times daily. The schedule runs at 00:00, 10:00, and 20:00 UTC
-(10-hour gaps with a 4-hour gap across midnight). It restores the previous catalog and history before
-fetching, avoiding a full catalog scan on every run. This reduces request volume, though Steam can
-still rate-limit any egress IP. The workflow also supports manual runs.
+The GitHub Actions workflow requests one twentieth of the Steam item prices through the included
+Cloudflare Worker every 30 minutes, publishing the feed and rotating cursor to the `data` branch.
+Twenty successful runs complete a full catalog price pass in about 10 hours. It restores the prior
+catalog and history before fetching, avoids a full catalog scan each run, and keeps price requests to
+two concurrent workers. Steam can still rate-limit any egress IP. The workflow also supports manual runs.
 
 To deploy the Worker to your Cloudflare account:
 
