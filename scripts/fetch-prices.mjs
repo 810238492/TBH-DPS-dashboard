@@ -48,8 +48,9 @@ const STALL = 14;          // stop after this many consecutive pages with no new
 const MAX_PAGES = 200;     // hard backstop
 while (guard++ < MAX_PAGES) {
   let j = null, results = null;
+  let lastError = 'invalid Steam response';
   for (let attempt = 0; attempt < 6; attempt++) {
-    try { j = await page(start); } catch { j = null; }
+    try { j = await page(start); } catch (error) { lastError = error?.message || String(error); j = null; }
     if (j && j.success === true && Array.isArray(j.results)) {
       results = j.results;
       if (results.length > 0 || attempt >= 3) break;   // accept non-empty now; empty only after retries
@@ -57,7 +58,7 @@ while (guard++ < MAX_PAGES) {
     await sleep(4000 * (attempt + 1) + Math.floor(Math.random() * 1500));   // back off + jitter, retry same start
     j = null; results = null;
   }
-  if (!j) throw new Error(`steam kept failing at start=${start} (got ${Object.keys(items).length})`);
+  if (!j) throw new Error(`steam kept failing at start=${start} (got ${Object.keys(items).length}; last error: ${lastError})`);
   if (typeof j.total_count === 'number' && j.total_count > 0) maxTotal = Math.max(maxTotal, j.total_count);
   results = results || [];
   for (const r of results) {
