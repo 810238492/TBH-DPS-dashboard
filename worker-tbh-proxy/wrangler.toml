@@ -1,4 +1,3 @@
-name = "tbh-proxy"
+name = "tbh-dps-market-proxy"
 main = "worker.js"
 compatibility_date = "2025-01-01"
-account_id = "f566818c6e44ffc818fdd420d8697959"

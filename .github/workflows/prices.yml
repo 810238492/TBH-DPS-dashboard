@@ -30,7 +30,7 @@ jobs:
         # so route the catalog sweep + priceoverview through the same Cloudflare Worker proxy — CF
         # egress isn't throttled, so we get the full 740 + all volumes in seconds.
         env:
-          PROXY_BASE: 'https://tbh-proxy.mike25326799.workers.dev'
+          PROXY_BASE: ${{ vars.PROXY_BASE }}
           PROXY_KEY: ${{ secrets.PROXY_KEY }}
         run: node scripts/fetch-prices.mjs
       # The rich Terminal/F4 dataset (full catalog + top-N detail) from tbh-market. Isolated from the
@@ -41,7 +41,7 @@ jobs:
           MAX_DETAIL: '140'
           # tbh-market 403s GitHub's datacenter IPs, so route through our Cloudflare Worker proxy
           # (worker-tbh-proxy/) which CF egress reaches fine. PROXY_KEY gates it (repo secret).
-          PROXY_BASE: 'https://tbh-proxy.mike25326799.workers.dev'
+          PROXY_BASE: ${{ vars.PROXY_BASE }}
           PROXY_KEY: ${{ secrets.PROXY_KEY }}
         run: node scripts/fetch-market.mjs
       - name: Publish to the data branch

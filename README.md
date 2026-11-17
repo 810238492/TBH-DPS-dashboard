@@ -156,6 +156,25 @@ Press **F4** to enter position-adjust mode and drag the box where you want it. T
 </tr>
 </table>
 
+### Self-host the price proxy (GitHub Actions)
+The scheduled workflow needs a Cloudflare Worker proxy because Steam rate-limits GitHub-hosted runners.
+Deploy the included Worker to your own Cloudflare account, then configure this repository:
+
+1. Install Node.js, open a terminal at the repository root, and run `npx wrangler login`.
+2. Deploy with `npx wrangler deploy --config worker-tbh-proxy/wrangler.toml`. Copy the resulting
+   `https://…workers.dev` URL.
+3. Set a long random key as the Worker secret with
+   `npx wrangler secret put PROXY_KEY --config worker-tbh-proxy/wrangler.toml`.
+4. In this repository, open **Settings → Secrets and variables → Actions**. Add a repository secret
+   named `PROXY_KEY` with the same key, and a repository variable named `PROXY_BASE` with the Worker
+   URL (no trailing slash).
+5. Enable Actions for the fork and run **Actions → steam-prices → Run workflow** once. The workflow
+   then refreshes the CNY feed on its 30-minute schedule.
+
+The proxy key is created by you and must match on Cloudflare and GitHub. Do not commit it or post it
+in an issue or chat. The Worker configuration intentionally has no upstream account ID so Wrangler
+deploys it to the account you select during login.
+
 ## Control Center (F1)
 Press **F1** for the **control center** — one compact hub that lists **every** panel as a toggle button
 (lit when shown, dim when hidden), so you can flip DPS, damage-taken, compare, planner, box-log, opened-box
