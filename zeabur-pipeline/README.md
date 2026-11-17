@@ -7,6 +7,10 @@ Replaces the GitHub Actions `steam-prices` cron + Cloudflare Worker proxy. Runs 
   build prices.json + market.json + detail → orphan-force-push to the `data` branch.
 - **volumeLoop** every `VOL_INTERVAL_MS` (default 10000ms): one Steam priceoverview for the stalest
   item; 24h volume/median rotates through the whole catalog (~2h/cycle), never tripping rate limits.
+- Steam requests use currency `23` (CNY); published price feeds label values with `¥`.
+- On the first run after switching from USD, the pipeline clears old price/median history so the new
+  CNY series cannot mix currencies. It builds history forward from CNY observations; it does not seed
+  CNY charts from the legacy endpoint because that endpoint does not declare its currency.
 
 ## Env vars
 - `DEPLOY_KEY_B64` — base64 of an ed25519 private key whose public half is a **write** deploy key on

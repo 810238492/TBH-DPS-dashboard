@@ -18,8 +18,10 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 const execFileP = promisify(execFile);
 
 const APPID = 3678970;
+const STEAM_CURRENCY = 23; // CNY / Chinese Renminbi (yuan)
+const CURRENCY_SYMBOL = '¥';
 const UA = 'tbh-zeabur-pipeline';
-const REPO = process.env.REPO || 'WarmBed/TBH-DPS-dashboard';
+const REPO = process.env.REPO || '810238492/TBH-DPS-dashboard';
 const PRICE_INTERVAL_MS = Number(process.env.PRICE_INTERVAL_MS || 5 * 60 * 1000);
 const VOL_INTERVAL_MS = Number(process.env.VOL_INTERVAL_MS || 10000);   // one priceoverview per 10s
 const MAX_DETAIL = Number(process.env.MAX_DETAIL || 140);
@@ -42,7 +44,7 @@ async function jget(url, { tries = 4, label = '' } = {}) {
 
 // ---------- Steam (direct) ----------
 function searchUrl(start) {
-  return `https://steamcommunity.com/market/search/render/?appid=${APPID}&norender=1&count=${PER}&start=${start}&sort_column=name&sort_dir=asc`;
+  return `https://steamcommunity.com/market/search/render/?appid=${APPID}&currency=${STEAM_CURRENCY}&norender=1&count=${PER}&start=${start}&sort_column=name&sort_dir=asc`;
 }
 async function getPage(start) {
   // fail fast on a throttled page — the multi-pass sweep re-fetches misses next pass, so don't burn
@@ -56,12 +58,11 @@ async function getPage(start) {
 }
 async function sweepCatalog() {
   const items = {};
-  let currency = '$', total = 0;
+  let total = 0;
   const absorb = (j) => {
     if (!j || !Array.isArray(j.results)) return;
     for (const r of j.results) {
       const name = r.hash_name || r.name; if (!name) continue;
-      if (currency === '$' && r.sell_price_text) currency = r.sell_price_text.replace(/[0-9.,\s]/g, '') || '$';
       const ad = r.asset_description || {};
       items[name] = { lowestCents: r.sell_price ?? 0, qty: r.sell_listings ?? 0, dispName: ad.name || name, color: ad.name_color || null, icon: ad.icon_url || null, type: ad.type || null };
     }
@@ -79,12 +80,12 @@ async function sweepCatalog() {
     if ((total && c >= total) || c === prevCount) break;   // full catalog, or a pass added nothing new
     prevCount = c;
   }
-  return { items, total: total || Object.keys(items).length, currency };
+  return { items, total: total || Object.keys(items).length, currency: CURRENCY_SYMBOL };
 }
 async function priceoverview(name) {
   for (let a = 0; a < 3; a++) {
     try {
-      const r = await fetch(`https://steamcommunity.com/market/priceoverview/?appid=${APPID}&currency=1&market_hash_name=${encodeURIComponent(name)}`, { headers: { 'User-Agent': UA } });
+      const r = await fetch(`https://steamcommunity.com/market/priceoverview/?appid=${APPID}&currency=${STEAM_CURRENCY}&market_hash_name=${encodeURIComponent(name)}`, { headers: { 'User-Agent': UA } });
       if (r.status === 429) { await sleep(8000); continue; }
       if (r.ok) return await r.json();   // success may be true or false
     } catch { /* retry */ }
@@ -94,19 +95,7 @@ async function priceoverview(name) {
 }
 
 // ---------- tbh-market (direct) ----------
-const TBH_ITEM = 'https://tbh-market.com/api/item/';
 const TBH_OB = 'https://tbh-market.com/api/orderbook/';
-const BUCKET_MS = 2 * 3600 * 1000;
-function downsample(points, bucketMs) { const out = []; let lastB = -2; for (const p of points) { const b = Math.floor(p[0] / bucketMs); if (b !== lastB) { out.push(p); lastB = b; } } return out; }
-async function tbhBackfill(name) {
-  try {
-    const j = await jget(TBH_ITEM + encodeURIComponent(name), { tries: 2, label: 'tbh item' });
-    const h = Array.isArray(j?.history) ? j.history : null;
-    if (!h) return null;
-    const pts = h.filter((p) => p && p.recorded_at && p.sell_price != null).map((p) => [p.recorded_at * 1000, p.sell_price]);
-    return downsample(pts, BUCKET_MS);
-  } catch { return null; }
-}
 
 // ---------- localized names (item_names.json on main) ----------
 const RARITY = {
@@ -139,9 +128,8 @@ function sparkOf(hist) { if (!hist || hist.length < 2) return null; const v = cl
 
 // ---------- state ----------
 const DAY = 86400000, HISTORY_DAYS = 8, SAMPLE_GAP_MS = 25 * 60 * 1000, HIST_WINDOW_MS = 7 * DAY;
-let history = { items: {}, vol: { at: 0, items: {} } };
+let history = { currencyCode: STEAM_CURRENCY, items: {}, vol: { at: 0, items: {} } };
 let catalog = {};   // hash -> sweep info (price/qty/disp/color/icon/type)
-let backfilledOnce = new Set();
 
 async function loadState() {
   try {
@@ -149,6 +137,11 @@ async function loadState() {
     if (j && typeof j === 'object') history = j;
     if (!history.items || Array.isArray(history.items)) history.items = {};
     if (!history.vol) history.vol = { at: 0, items: {} };
+    if (history.currencyCode !== STEAM_CURRENCY) {
+      log(`resetting history from currency ${history.currencyCode ?? 'unknown'} to CNY`);
+      history = { currencyCode: STEAM_CURRENCY, items: {}, vol: { at: 0, items: {} } };
+    }
+    history.currencyCode = STEAM_CURRENCY;
     log(`state: ${Object.keys(history.items).length} hist series, ${Object.keys(history.vol.items).length} vol entries`);
   } catch (e) { log('no prior state:', e.message); }
 }
@@ -160,15 +153,10 @@ async function buildAndPublish() {
   const now = Date.now();
   const cutoff = now - HISTORY_DAYS * DAY;
 
-  // price history forward points + first-sight backfill (gentle, capped per cycle)
-  let backfills = 0;
+  // Build history from CNY observations forward. The legacy tbh-market history endpoint does not
+  // identify its currency, so it is intentionally not used to seed this CNY series.
   for (const name of names) {
     let series = Array.isArray(history.items[name]) ? history.items[name] : null;
-    if ((!series || series.length < 4) && !backfilledOnce.has(name) && backfills < 30) {
-      backfilledOnce.add(name);
-      const seed = await tbhBackfill(name);
-      if (seed && seed.length) { series = seed; backfills++; await sleep(300); }
-    }
     if (!series) series = [];
     const last = series[series.length - 1];
     const v = catalog[name];
@@ -218,14 +206,14 @@ async function buildAndPublish() {
     await sleep(120);
   }
 
-  const prices = { cachedAt: now, appid: APPID, currency: '$', count: Object.keys(items).length, items };
-  const market = { builtAt: now, total: list.length, count: list.length, currency: '$', list };
+  const prices = { cachedAt: now, appid: APPID, currency: CURRENCY_SYMBOL, currencyCode: STEAM_CURRENCY, count: Object.keys(items).length, items };
+  const market = { builtAt: now, total: list.length, count: list.length, currency: CURRENCY_SYMBOL, currencyCode: STEAM_CURRENCY, list };
   await writeFile(`${pub}/prices.json`, JSON.stringify(prices));
   await writeFile(`${pub}/history.json`, JSON.stringify(history));
   await writeFile(`${pub}/market.json`, JSON.stringify(market));
 
   await publish(pub);
-  log(`published: ${list.length} items, ${list.filter((x) => x.vol > 0).length} with vol, ${obDone}/${byVol.length} orderbooks, ${backfills} backfilled`);
+  log(`published: ${list.length} items in CNY, ${list.filter((x) => x.vol > 0).length} with vol, ${obDone}/${byVol.length} orderbooks`);
 }
 
 // ---------- git push (orphan force-push, single commit, via deploy key over SSH) ----------

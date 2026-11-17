@@ -304,7 +304,7 @@ namespace TbhDpsMeter
 
         void Awake()
         {
-            PanelRegistry.Register("price", 8, "$", () => Loc.G("price_panel"), KeyCode.None,
+            PanelRegistry.Register("price", 8, "¥", () => Loc.G("price_panel"), KeyCode.None,
                 () => Plugin.PricePeekEnabled == null || Plugin.PricePeekEnabled.Value,
                 v => { if (Plugin.PricePeekEnabled != null) Plugin.PricePeekEnabled.Value = v; });
         }

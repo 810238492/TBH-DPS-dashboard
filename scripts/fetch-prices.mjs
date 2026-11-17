@@ -5,6 +5,8 @@
 import { writeFile } from 'node:fs/promises';
 
 const APPID = 3678970;
+const STEAM_CURRENCY = 23; // CNY / Chinese Renminbi (yuan)
+const CURRENCY_SYMBOL = '¥';
 const PER = 100;            // Steam caps search/render at 100 per page
 const UA = 'Mozilla/5.0 (tbh-prices-cron; +https://github.com/WarmBed/TBH-DPS-dashboard)';
 
@@ -17,11 +19,11 @@ const PROXY_KEY = process.env.PROXY_KEY || '';
 const VIA_PROXY = !!PROXY_BASE;
 const PROXY_H = PROXY_KEY ? { 'x-proxy-key': PROXY_KEY } : {};
 function searchUrl(start) {
-  const q = `appid=${APPID}&norender=1&count=${PER}&start=${start}&sort_column=name&sort_dir=asc`;
+  const q = `appid=${APPID}&currency=${STEAM_CURRENCY}&norender=1&count=${PER}&start=${start}&sort_column=name&sort_dir=asc`;
   return VIA_PROXY ? `${PROXY_BASE}/steam/search?${q}` : `https://steamcommunity.com/market/search/render/?${q}`;
 }
 function priceUrl(name) {
-  const q = `appid=${APPID}&currency=1&market_hash_name=${encodeURIComponent(name)}`;
+  const q = `appid=${APPID}&currency=${STEAM_CURRENCY}&market_hash_name=${encodeURIComponent(name)}`;
   return VIA_PROXY ? `${PROXY_BASE}/steam/price?${q}` : `https://steamcommunity.com/market/priceoverview/?${q}`;
 }
 
@@ -34,7 +36,7 @@ async function page(start) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const items = {};
-let start = 0, maxTotal = 0, currency = '', guard = 0, sinceNew = 0, lastCount = 0;
+let start = 0, maxTotal = 0, guard = 0, sinceNew = 0, lastCount = 0;
 // Steam's market search is hostile to completeness: total_count is FLAKY+inflated (151 one call, 112 the
 // next; counts delisted/0-listing entries it never actually returns), it caps the page at ~10 regardless
 // of count=, the result ORDER shifts between calls (so a fixed start-window misses items that moved), and
@@ -61,7 +63,6 @@ while (guard++ < MAX_PAGES) {
   for (const r of results) {
     const name = r.hash_name || r.name;
     if (!name) continue;
-    if (!currency && r.sell_price_text) currency = r.sell_price_text.replace(/[0-9.,\s]/g, ''); // e.g. "$"
     // asset_description carries the display name, rarity color, icon and type — captured so the web
     // terminal can build its catalog from Steam directly (no tbh-market for anything but the order book).
     const ad = r.asset_description || {};
@@ -83,55 +84,33 @@ const gotCount = Object.keys(items).length;
 console.log(`[prices] fetched ${gotCount} unique items in ${guard} pages (steam total_count reported up to ${maxTotal})`);
 if (gotCount < 50) { console.error(`[prices] ABORT: only ${gotCount} items — Steam rate-limited the run; keeping the previous feed.`); process.exit(1); }
 
-// ---- price history (item-major). Each item keeps a rolling [[tMs, cents], ...] series in history.json,
-// read back each run from raw.githubusercontent (the data branch is force-pushed as a single orphan
-// commit, so we persist the window inside the file). On first sight of an item we BACKFILL its real
-// history from tbh-market's public API (Steam data, no login); afterwards our own 30-min cron appends
-// forward. Sampled ~2h, kept ~8 days. Item-major also avoids repeating item names every snapshot.
+// ---- price history (item-major). Each item keeps a rolling [[tMs, minorUnits], ...] series in
+// history.json. Old USD history and tbh-market's unqualified history cannot safely be mixed with CNY,
+// so history starts fresh after a currency change and accumulates Steam CNY observations forward.
 const now = Date.now();
 const DAY = 86400000;
 const HISTORY_DAYS = 8;
 const SAMPLE_GAP_MS = 25 * 60 * 1000;      // ~30min spacing (one point per cron run) for intraday timeframes
-const BUCKET_MS = 2 * 3600 * 1000;         // downsample backfilled points to ~2h
 const HIST_WINDOW_MS = 7 * DAY;            // window shipped to the plugin
-const MAX_BACKFILL = 400;                  // per-run cap on tbh-market fetches (one-time courtesy burst)
 const REPO = process.env.GITHUB_REPOSITORY || 'WarmBed/TBH-DPS-dashboard';
 const HISTORY_URL = `https://raw.githubusercontent.com/${REPO}/data/history.json`;
-const TBH_ITEM = 'https://tbh-market.com/api/item/';
 
-let history = { items: {}, vol: { at: 0, items: {} } };
+let history = { currencyCode: STEAM_CURRENCY, items: {}, vol: { at: 0, items: {} } };
 try {
   const r = await fetch(HISTORY_URL, { headers: { 'User-Agent': UA } });
   if (r.ok) { const j = await r.json(); if (j && typeof j === 'object') history = j; }
 } catch { /* first run / 404 -> empty history */ }
 if (!history.items || Array.isArray(history.items)) history.items = {};   // ignore old snapshot-major format
 if (!history.vol) history.vol = { at: 0, items: {} };
-
-function downsample(points, bucketMs) {
-  const out = []; let lastB = -2;
-  for (const p of points) { const b = Math.floor(p[0] / bucketMs); if (b !== lastB) { out.push(p); lastB = b; } }
-  return out;
+if (history.currencyCode !== STEAM_CURRENCY) {
+  console.log(`[prices] resetting history from currency ${history.currencyCode ?? 'unknown'} to CNY`);
+  history = { currencyCode: STEAM_CURRENCY, items: {}, vol: { at: 0, items: {} } };
 }
-async function tbhBackfill(name) {
-  try {
-    const r = await fetch(TBH_ITEM + encodeURIComponent(name), { headers: { 'User-Agent': UA } });
-    if (!r.ok) return null;
-    const j = await r.json();
-    const h = Array.isArray(j?.history) ? j.history : null;
-    if (!h) return null;
-    const pts = h.filter(p => p && p.recorded_at && p.sell_price != null).map(p => [p.recorded_at * 1000, p.sell_price]);
-    return downsample(pts, BUCKET_MS);
-  } catch { return null; }
-}
+history.currencyCode = STEAM_CURRENCY;
 
 const cutoff = now - HISTORY_DAYS * DAY;
-let backfilled = 0;
 for (const [name, v] of Object.entries(items)) {
   let series = Array.isArray(history.items[name]) ? history.items[name] : null;
-  if ((!series || series.length < 4) && backfilled < MAX_BACKFILL) {   // one-time real-history seed
-    const seed = await tbhBackfill(name);
-    if (seed && seed.length) { series = seed; backfilled++; await sleep(1500); }   // be gentle to tbh-market
-  }
   if (!series) series = [];
   const lastPt = series[series.length - 1];
   // forward point: [tMs, cents, 24h-volume] — the volume is the last-known (≤6h) priceoverview figure,
@@ -213,7 +192,7 @@ for (const [name, v] of Object.entries(items)) {
   if (vr) { v.vol = vr.vol; v.medianCents = vr.medianCents; }
 }
 
-const out = { cachedAt: now, appid: APPID, currency: currency || '$', count: Object.keys(items).length, items };
+const out = { cachedAt: now, appid: APPID, currency: CURRENCY_SYMBOL, currencyCode: STEAM_CURRENCY, count: Object.keys(items).length, items };
 await writeFile('prices.json', JSON.stringify(out));
 await writeFile('history.json', JSON.stringify(history));
-console.log(`wrote prices.json: ${out.count} items; backfilled ${backfilled} from tbh-market, prevCents on ${stamped}, hist series for ${Object.keys(history.items).length} items`);
+console.log(`wrote prices.json: ${out.count} items in CNY; prevCents on ${stamped}, hist series for ${Object.keys(history.items).length} items`);

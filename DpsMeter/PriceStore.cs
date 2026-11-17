@@ -13,7 +13,7 @@ namespace TbhDpsMeter
     {
         public enum St { Idle, Loading, Ready, Error }
         public static volatile St State = St.Idle;
-        public static string Currency = "$";
+        public static string Currency = "¥";
         public static long CachedAtMs;   // ms since unix epoch, from prices.json
 
         /// <summary>Per-item market data from prices.json.</summary>
@@ -40,8 +40,8 @@ namespace TbhDpsMeter
 
         // raw.githubusercontent refreshes within ~minutes (the cron relies on it too); jsDelivr's branch
         // cache lags our 30-min updates badly, so it's only the fallback if raw is unreachable.
-        private const string Url = "https://raw.githubusercontent.com/WarmBed/TBH-DPS-dashboard/data/prices.json";
-        private const string UrlFallback = "https://cdn.jsdelivr.net/gh/WarmBed/TBH-DPS-dashboard@data/prices.json";
+        private const string Url = "https://raw.githubusercontent.com/810238492/TBH-DPS-dashboard/data/prices.json";
+        private const string UrlFallback = "https://cdn.jsdelivr.net/gh/810238492/TBH-DPS-dashboard@data/prices.json";
         private const string Ua = "TBH-DpsMeter-Prices";
 
         /// <summary>Kick off the one-time async fetch. Safe to call every frame.</summary>
@@ -64,7 +64,7 @@ namespace TbhDpsMeter
                         try { json = await http.GetStringAsync(Url); }
                         catch { json = await http.GetStringAsync(UrlFallback); }   // raw down -> jsDelivr
                         var o = Json.Parse(json);
-                        Currency = Json.Str(Json.Get(o, "currency")) ?? "$";
+                        Currency = Json.Str(Json.Get(o, "currency")) ?? "¥";
                         CachedAtMs = Json.Long(Json.Get(o, "cachedAt"));
                         var items = Json.Obj(Json.Get(o, "items"));
                         // build into a fresh map and swap in at the end (don't mutate the live one)
@@ -124,7 +124,7 @@ namespace TbhDpsMeter
         public static Info Get(string hashName)
             => (!string.IsNullOrEmpty(hashName) && _items.TryGetValue(hashName, out var v)) ? v : null;
 
-        /// <summary>Format cents as a currency string, e.g. 1234 -> "$12.34".</summary>
+        /// <summary>Format minor currency units as a currency string, e.g. 1234 -> "¥12.34".</summary>
         public static string Format(int cents)
         {
             return Currency + (cents / 100.0).ToString("0.00");

@@ -142,6 +142,7 @@ Hover an item — in your **backpack**, a reward popup, anywhere it has a toolti
 **24h volume**, and a **7-day price curve**. Prices come from a cron-built feed refreshed every ~30 min, so
 no per-player Steam scraping. **Middle-click** an item to **pin** the box to it — it stays put while you move
 the cursor onto the curve, where hovering any point shows that point's **time · price · change vs now**.
+The feed requests Steam's CNY market currency and displays prices in yuan (¥).
 Press **F4** to enter position-adjust mode and drag the box where you want it. Toggle it from the F1 control center.
 
 <table>

@@ -1,5 +1,5 @@
 // Build the web Terminal dataset from OUR Steam data (prices.json + history.json, written by
-// fetch-prices.mjs earlier in the same job) — reliable, USD cents, consistent with the F4 price-peek.
+// fetch-prices.mjs earlier in the same job) — Steam Community Market prices in CNY minor units.
 // The ONLY thing fetched from tbh-market is the live ORDER BOOK (Steam's is login-gated), and that
 // goes through the Cloudflare Worker proxy (datacenter IPs are 403'd by tbh-market directly).
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -68,7 +68,7 @@ function localized(hash) {
   return null;
 }
 
-// catalog + price/median/vol/listings + spark/chg, all from Steam (USD cents)
+// catalog + price/median/vol/listings + spark/chg, all from Steam (CNY minor units)
 const list = Object.keys(items).map((hash) => {
   const v = items[hash];
   const prev = (v.prevCents != null && v.prevCents > 0) ? v.prevCents : null;
@@ -81,7 +81,7 @@ const list = Object.keys(items).map((hash) => {
   };
 });
 
-// detail = our lowest-ask price history (USD cents, matches the header) + tbh order book, for top-N by volume
+// detail = our lowest-ask price history (CNY minor units, matches the header) + tbh order book, for top-N by volume
 const byVol = list.slice().sort((a, b) => b.vol - a.vol).slice(0, MAX_DETAIL);
 await mkdir('detail', { recursive: true });
 let done = 0;
@@ -98,6 +98,6 @@ for (const it of byVol) {
   await sleep(OB_SLEEP);
 }
 
-const out = { builtAt: now, total: list.length, count: list.length, currency: '$', list };
+const out = { builtAt: now, total: list.length, count: list.length, currency: prices.currency || '¥', currencyCode: prices.currencyCode || 23, list };
 await writeFile('market.json', JSON.stringify(out));
 console.log(`wrote market.json: ${list.length} items (Steam prices.json); ${done}/${byVol.length} order books via proxy`);
