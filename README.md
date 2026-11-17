@@ -157,11 +157,13 @@ Press **F4** to enter position-adjust mode and drag the box where you want it. T
 </table>
 
 ### Refresh the price feed
-The GitHub Actions workflow requests one twentieth of the Steam item prices through the included
-Cloudflare Worker every 30 minutes, publishing the feed and rotating cursor to the `data` branch.
-Twenty successful runs complete a full catalog price pass in about 10 hours. It restores the prior
-catalog and history before fetching, avoids a full catalog scan each run, and keeps price requests to
-two concurrent workers. Steam can still rate-limit any egress IP. The workflow also supports manual runs.
+Steam rate-limits the Cloudflare Worker egress, so the Windows updater requests one twentieth of the
+catalog directly over the user's network every 30 minutes and publishes prices plus its cursor to the
+`data` branch. Twenty successful batches complete a full catalog pass in about 10 hours. The scheduled
+GitHub Actions trigger is disabled for price fetching; the Windows Task Scheduler task is named
+**TBH DPS Dashboard CNY Feed**. It must be enabled and the user must be logged in for its interactive
+task token. The updater keeps requests sequential and retries the same batch until every item has a
+valid response, so a partial run cannot silently skip items.
 
 To deploy the Worker to your Cloudflare account:
 
