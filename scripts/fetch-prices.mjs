@@ -218,8 +218,9 @@ function priceBatch(name) {
   for (let i = 0; i < name.length; i++) { hash ^= name.charCodeAt(i); hash = Math.imul(hash, 16777619); }
   return (hash >>> 0) % PRICE_BATCH_COUNT;
 }
-if (VIA_PROXY && !process.env.SKIP_VOL) {
-  // Each half-hour run handles one stable 1/20 cohort; the cursor is persisted in history.json.
+if (!process.env.SKIP_VOL) {
+  // Each scheduled run handles one stable 1/20 cohort, regardless of whether Steam is reached
+  // directly (local updater) or through a proxy. The cursor is persisted in history.json.
   const storedCursor = Number(history.priceBatchCursor);
   if (!Number.isInteger(storedCursor) || storedCursor < 0 || storedCursor >= PRICE_BATCH_COUNT)
     history.priceBatchCursor = 0;   // initialize legacy history files written before batch rotation existed
@@ -230,32 +231,32 @@ if (VIA_PROXY && !process.env.SKIP_VOL) {
     const ta = (vol.items[a] && vol.items[a].at) || 0, tb = (vol.items[b] && vol.items[b].at) || 0;
     return ta !== tb ? ta - tb : (items[b].qty || 0) - (items[a].qty || 0);
   });
-  const deadline = Date.now() + VOL_BUDGET_MS;   // budget from here, so a slow sweep doesn't starve volume
+  const deadline = Date.now() + VOL_BUDGET_MS;
   let done = 0, idx = 0;
-  const worker = async () => { while (idx < order.length && Date.now() < deadline) { const n = order[idx++]; if (applyVol(n, await priceoverview(n, 3))) done++; } };
-  await Promise.all(Array.from({ length: 2 }, worker));
-  if (done > 0) history.priceBatchCursor = (batch + 1) % PRICE_BATCH_COUNT;
+  if (VIA_PROXY) {
+    // Keep proxy pressure low; Steam/Cloudflare may return 429 even for authenticated Worker calls.
+    while (idx < order.length && Date.now() < deadline) {
+      const n = order[idx++];
+      if (applyVol(n, await priceoverview(n, 2))) done++;
+    }
+  } else {
+    // The local Windows updater uses the user's own network exit. One request at a time is
+    // substantially less likely to trigger Steam's per-IP throttle.
+    while (idx < order.length && Date.now() < deadline) {
+      const n = order[idx++];
+      if (applyVol(n, await priceoverview(n, 3))) done++;
+      await sleep(3500);
+    }
+  }
+  // Never skip an item that failed during a partial batch. The next run retries this same cohort.
+  if (order.length > 0 && done === order.length) history.priceBatchCursor = (batch + 1) % PRICE_BATCH_COUNT;
   const failures = [...priceFailureCounts].map(([kind, count]) => `${kind}=${count}`).join(', ') || 'none';
-  console.log(`refreshed ${done}/${order.length} items in price batch ${batch + 1}/${PRICE_BATCH_COUNT} (next batch ${history.priceBatchCursor + 1}, ${Math.round(VOL_BUDGET_MS / 1000)}s budget, via proxy; failures: ${failures})`);
+  console.log(`refreshed ${done}/${order.length} items in price batch ${batch + 1}/${PRICE_BATCH_COUNT} (next batch ${history.priceBatchCursor + 1}, ${Math.round(VOL_BUDGET_MS / 1000)}s budget, ${VIA_PROXY ? 'via proxy' : 'direct'}; failures: ${failures})`);
   if (order.length > 0 && done === 0) {
     console.error('[prices] ABORT: no valid priceoverview responses; refusing to publish stale prices or advance the batch cursor.');
     process.exit(1);
   }
-  vol.at = now;
-} else if (!process.env.SKIP_VOL) {
-  const order = volNames.slice().sort((a, b) => {
-    const ta = (vol.items[a] && vol.items[a].at) || 0, tb = (vol.items[b] && vol.items[b].at) || 0;
-    return ta !== tb ? ta - tb : (items[b].qty || 0) - (items[a].qty || 0);
-  });
-  const deadline = Date.now() + VOL_BUDGET_MS;
-  let done = 0;
-  for (const name of order) {
-    if (Date.now() >= deadline) break;
-    if (applyVol(name, await priceoverview(name, 3))) done++;
-    await sleep(3500);   // ~17 requests/minute on the user's local egress
-  }
-  vol.at = now;
-  console.log(`refreshed CNY price/volume/median for ${done}/${order.length} items (direct, ${Math.round(VOL_BUDGET_MS / 1000)}s budget)`);
+  if (order.length === 0 || done > 0) vol.at = now;
 }
 history.vol = vol;
 for (const [name, v] of Object.entries(items)) {

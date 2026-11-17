@@ -1,12 +1,10 @@
 name: steam-prices
 
-# Fetch one twentieth of TaskBarHero Steam Community Market prices every 30 min through Cloudflare.
-# The persisted cursor completes one catalog pass in 10 hours (20 successful runs).
+# Steam returns HTTP 429 to the Cloudflare Worker egress. Price updates now run from the user's
+# Windows task over the local network exit, one twentieth of the catalog every 30 minutes.
 # Served to the plugin via jsDelivr: cdn.jsdelivr.net/gh/WarmBed/TBH-DPS-dashboard@data/prices.json
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'
   workflow_dispatch: {}
 
 permissions:
