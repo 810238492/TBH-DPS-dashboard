@@ -157,18 +157,13 @@ Press **F4** to enter position-adjust mode and drag the box where you want it. T
 </table>
 
 ### Refresh the price feed
-Steam rate-limits GitHub-hosted runners, so the reliable 30-minute refresh runs on your Windows PC
-and publishes to this repository's `data` branch. Keep the PC logged in, Steam reachable through
-your normal connection, and GitHub's credential manager signed in. Run
-`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/update-local-feed.ps1` once to publish
-immediately. To repeat it every 30 minutes, create a Task Scheduler task that runs the same command
-as your logged-in Windows user. The task uses the Windows proxy setting when one is configured.
+The GitHub Actions workflow requests Steam prices through the included Cloudflare Worker and publishes
+the feed to the `data` branch three times daily. The schedule runs at 00:00, 10:00, and 20:00 UTC
+(10-hour gaps with a 4-hour gap across midnight). It restores the previous catalog and history before
+fetching, avoiding a full catalog scan on every run. This reduces request volume, though Steam can
+still rate-limit any egress IP. The workflow also supports manual runs.
 
-GitHub Actions has a manual workflow for troubleshooting, but its scheduled trigger is disabled
-because Steam returns HTTP 429 from hosted runners. The optional Cloudflare Worker remains available
-for proxying requests; it does not remove Steam's rate limit.
-
-To deploy the optional Worker to your Cloudflare account:
+To deploy the Worker to your Cloudflare account:
 
 1. Install Node.js, open a terminal at the repository root, and run `npx wrangler login`.
 2. Deploy with `npx wrangler deploy --config worker-tbh-proxy/wrangler.toml`. Copy the resulting
@@ -178,7 +173,7 @@ To deploy the optional Worker to your Cloudflare account:
 4. In this repository, open **Settings → Secrets and variables → Actions**. Add a repository secret
    named `PROXY_KEY` with the same key, and a repository variable named `PROXY_BASE` with the Worker
    URL (no trailing slash).
-5. The Actions workflow can be run manually, but automatic refresh is handled by the local task above.
+5. Enable Actions for the fork. The `steam-prices` workflow then runs automatically on its schedule.
 
 The proxy key is created by you and must match on Cloudflare and GitHub. Do not commit it or post it
 in an issue or chat. The Worker configuration intentionally has no upstream account ID so Wrangler

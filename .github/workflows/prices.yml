@@ -1,10 +1,12 @@
 name: steam-prices
 
-# Manually fetch TaskBarHero Steam Community Market prices and publish prices.json to the
-# `data` branch. GitHub-hosted requests are rate-limited by Steam; scheduled refreshes run locally.
+# Fetch TaskBarHero Steam Community Market prices through the Cloudflare Worker and publish to
+# `data`. It runs three times daily (10h, 10h, then 4h across UTC midnight).
 # Served to the plugin via jsDelivr: cdn.jsdelivr.net/gh/WarmBed/TBH-DPS-dashboard@data/prices.json
 
 on:
+  schedule:
+    - cron: '0 0,10,20 * * *'
   workflow_dispatch: {}
 
 permissions:
@@ -23,10 +25,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Restore prior market data
+        run: |
+          git fetch --quiet origin data --depth=1
+          git show FETCH_HEAD:prices.json > prices.json
+          git show FETCH_HEAD:history.json > history.json
       - name: Fetch Steam market prices
-        # Steam heavily rate-limits GitHub's datacenter IP (sweep stalls ~131/740, volume loop hangs),
-        # so route the catalog sweep + priceoverview through the same Cloudflare Worker proxy — CF
-        # egress isn't throttled, so we get the full 740 + all volumes in seconds.
+        # Route requests through the authenticated Cloudflare Worker and keep request concurrency low.
+        # The previous data branch is restored above so routine runs can skip the full catalog sweep.
         env:
           PROXY_BASE: ${{ vars.PROXY_BASE }}
           PROXY_KEY: ${{ secrets.PROXY_KEY }}

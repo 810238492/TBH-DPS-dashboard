@@ -199,7 +199,7 @@ if (VIA_PROXY && !process.env.SKIP_VOL) {
   const deadline = Date.now() + VOL_BUDGET_MS;   // budget from here, so a slow sweep doesn't starve volume
   let done = 0, idx = 0;
   const worker = async () => { while (idx < order.length && Date.now() < deadline) { const n = order[idx++]; if (applyVol(n, await priceoverview(n, 3))) done++; } };
-  await Promise.all(Array.from({ length: 8 }, worker));
+  await Promise.all(Array.from({ length: 2 }, worker));
   vol.at = now;
   console.log(`refreshed volume/median for ${done}/${order.length} items this run (stalest-first, ${Math.round(VOL_BUDGET_MS / 1000)}s budget, via proxy)`);
 } else if (!process.env.SKIP_VOL) {
