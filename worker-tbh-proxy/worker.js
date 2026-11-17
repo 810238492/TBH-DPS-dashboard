@@ -8,7 +8,9 @@ const STEAM_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (env.PROXY_KEY && request.headers.get("x-proxy-key") !== env.PROXY_KEY)
+    if (!env.PROXY_KEY)
+      return new Response("proxy key not configured", { status: 503 });
+    if (request.headers.get("x-proxy-key") !== env.PROXY_KEY)
       return new Response("forbidden", { status: 403 });
 
     // Steam market endpoints. Pass the query string through verbatim; surface Steam's real status
